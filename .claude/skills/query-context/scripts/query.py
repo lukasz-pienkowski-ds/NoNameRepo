@@ -1,48 +1,36 @@
 #!/usr/bin/env python3
-"""Retrieve the top-k most similar documents from the DuckDB context store.
+"""Ask the context-store server for the top-k most similar documents.
 
-TODO(real-model): mock_embed in common/embeddings.py is a placeholder — the
-query embedding here must use the same embedding function as ingestion.
+Talks to the context store over HTTP (CONTEXT_STORE_URL env var, or --url) —
+no local DuckDB file or embedding code needed here, the server does both.
 """
 
 import argparse
 import json
-import sys
-from pathlib import Path
+import os
+import urllib.request
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
-
-from common.embeddings import mock_embed  # noqa: E402
-from db.init_db import DEFAULT_DB_PATH, init_db  # noqa: E402
+DEFAULT_URL = os.environ.get("CONTEXT_STORE_URL", "http://localhost:8000")
 
 
-def query(text: str, top_k: int = 5, db_path: Path = DEFAULT_DB_PATH) -> list[dict]:
-    con = init_db(db_path)
-    embedding = mock_embed(text)
-
-    rows = con.execute(
-        """
-        SELECT id, text, tags, metadata,
-               array_cosine_similarity(embedding, ?::FLOAT[16]) AS score
-        FROM documents
-        ORDER BY score DESC
-        LIMIT ?
-        """,
-        [embedding, top_k],
-    ).fetchall()
-
-    return [
-        {"id": r[0], "text": r[1], "tags": r[2], "metadata": r[3], "score": r[4]}
-        for r in rows
-    ]
+def query(text: str, top_k: int = 5, url: str = DEFAULT_URL) -> list[dict]:
+    payload = json.dumps({"text": text, "top_k": top_k}).encode()
+    req = urllib.request.Request(
+        f"{url.rstrip('/')}/query",
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read())
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("query_text", help="Text to find similar context documents for")
     parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--url", default=DEFAULT_URL, help="context-store base URL (default: %(default)s)")
     args = parser.parse_args()
 
-    results = query(args.query_text, args.top_k, args.db)
+    results = query(args.query_text, args.top_k, args.url)
     print(json.dumps(results, indent=2, default=str))
