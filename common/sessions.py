@@ -212,26 +212,33 @@ PROVIDERS = {
 }
 
 
-def session_files(provider: str) -> list[Path]:
+def session_files(provider: str, root: Path | None = None) -> list[Path]:
+    """Session files for a provider, or under `root` if one is given.
+
+    The override exists for fixtures and for hooks that write transcripts
+    somewhere other than the tool's own directory. It keeps testing out of
+    ~/.claude, which is the user's real session history.
+    """
     spec = PROVIDERS[provider]
+    roots = [root] if root is not None else spec["roots"]()
     files: list[Path] = []
-    for root in spec["roots"]():
-        if root.is_dir():
-            files.extend(sorted(root.glob(spec["glob"])))
+    for base in roots:
+        if base.is_dir():
+            files.extend(sorted(base.glob(spec["glob"])))
     return files
 
 
-def detect() -> dict[str, int]:
-    """Which providers actually have sessions on this machine, and how many."""
-    return {name: len(session_files(name)) for name in PROVIDERS}
+def detect(root: Path | None = None) -> dict[str, int]:
+    """Which providers actually have sessions here, and how many files each."""
+    return {name: len(session_files(name, root)) for name in PROVIDERS}
 
 
-def iter_messages(providers: list[str] | None = None) -> Iterator[Message]:
+def iter_messages(providers: list[str] | None = None, root: Path | None = None) -> Iterator[Message]:
     for name in providers or list(PROVIDERS):
         if name not in PROVIDERS:
             raise ValueError(f"unknown provider {name!r}; known: {sorted(PROVIDERS)}")
         reader = PROVIDERS[name]["reader"]
-        for path in session_files(name):
+        for path in session_files(name, root):
             yield from reader(path)
 
 

@@ -62,6 +62,7 @@ def cmd_find(store: DecisionStore, args) -> int:
         limit=args.limit,
         exclude_developer=args.exclude_developer,
         min_similarity=args.min_similarity,
+        min_relevance=args.min_relevance,
     )
     if not hits:
         # Not an error. A wrong precedent mid-work is worse than none.
@@ -94,7 +95,10 @@ def main() -> int:
     p_find = sub.add_parser("find", help="find precedents by tag and/or similarity")
     p_find.add_argument("--query", default=None, help="situation text; ranks by cosine similarity")
     p_find.add_argument("--tags", nargs="*", default=[])
-    p_find.add_argument("--min-similarity", type=float, default=0.0)
+    p_find.add_argument("--min-similarity", type=float, default=0.0,
+                        help="cosine cutoff; inert until a real embedding model is in")
+    p_find.add_argument("--min-relevance", type=float, default=0.0,
+                        help="BM25 cutoff; this is the one that works today")
     p_find.add_argument("--limit", type=int, default=3)
     p_find.add_argument("--exclude-developer", default=None)
     p_find.set_defaults(fn=cmd_find)

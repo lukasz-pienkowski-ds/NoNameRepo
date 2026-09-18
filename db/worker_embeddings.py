@@ -34,6 +34,12 @@ def process_batch(store: DecisionStore, batch_size: int) -> int:
     pending = store.pending_embeddings(batch_size)
     for decision_id, summary in pending:
         store.set_embedding(decision_id, mock_embed(summary or ""), EMBEDDING_DIM)
+    if pending:
+        # Refresh the text index in the same pass. Every new or edited record
+        # arrives here with a NULL embedding, so this queue is exactly the set
+        # of rows the index does not know about yet. Verified that rebuilding
+        # through quack really reindexes rather than quietly succeeding.
+        store.rebuild_fts_index()
     return len(pending)
 
 

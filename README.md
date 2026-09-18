@@ -24,7 +24,7 @@ db/extract.py              Scan agent sessions -> decisions -> store
 db/cli.py                  status / load / find / confirm
 
 test_smoke.py              30 offline checks (`make test`)
-test_integration.py        17 checks against a running store (`make test-integration`)
+test_integration.py        23 checks against a running store (`make test-integration`)
 data/seed/decisions.jsonl  Demo decisions
 docs/                      CENTRAL-STORE.md, HANDOVER.md, SCENARIUSZ.md
 ```
@@ -38,8 +38,17 @@ make seed                # load demo decisions
 make find TAGS=persystencja
 make detect              # which LLM CLIs have sessions on this machine
 make extract             # harvest decisions from them
-make test-all            # 30 offline + 17 integration checks
+make test-all            # 30 offline + 23 integration checks
 ```
+
+Then search by describing a situation in your own words:
+
+```bash
+.venv/bin/python db/cli.py find --query "dostawca ponawia webhooki i dostajemy podwojne obciazenia"
+```
+
+Ranking is BM25 over DuckDB's own full-text index — shared words, not meaning.
+`DEMO.md` walks through the whole scenario.
 
 `make help` lists the rest. Everything runs in the `docker/Dockerfile` image;
 nothing is needed on the host besides Docker.

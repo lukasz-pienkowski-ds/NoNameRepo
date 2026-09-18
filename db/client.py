@@ -17,6 +17,31 @@ from pathlib import Path
 
 import duckdb
 
+def _load_dotenv() -> None:
+    """Fill in QUACK_* from the repo's .env when the shell has not set them.
+
+    docker compose reads .env by itself, so the containers always have the
+    token while a plain `python db/cli.py ...` on the host did not -- and the
+    failure surfaced deep inside quack as "Could not find a Quack
+    authentication token". Reading the same file here removes a step every
+    person on the team would otherwise have to remember. Real environment
+    variables still win, so overriding for a different store keeps working.
+    """
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if not env_file.is_file():
+        return
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key.startswith("QUACK_") and not os.environ.get(key):
+            os.environ[key] = value
+
+
+_load_dotenv()
+
 DEFAULT_URI = os.environ.get("QUACK_URI", "quack://127.0.0.1:8888")
 DEFAULT_TOKEN = os.environ.get("QUACK_TOKEN", "")
 
@@ -79,6 +104,11 @@ class DecisionStore:
     """A connection to the central store over quack."""
 
     def __init__(self, uri: str = DEFAULT_URI, token: str = DEFAULT_TOKEN):
+        if not token:
+            raise SystemExit(
+                "Brak tokenu do centrali. Ustaw QUACK_TOKEN w .env w katalogu "
+                "repo, wyeksportuj go w powloce, albo podaj --token."
+            )
         self.uri = uri
         self.token = token
         self._con = duckdb.connect()
@@ -165,6 +195,7 @@ class DecisionStore:
         exclude_developer: str | None = None,
         min_tag_overlap: int = 1,
         min_similarity: float = 0.0,
+        min_relevance: float = 0.0,
     ) -> list[dict]:
         """Find decisions taken in a comparable situation.
 
@@ -194,8 +225,18 @@ class DecisionStore:
                 f"coalesce(array_cosine_similarity("
                 f"embedding, {sql_literal(vector)}::FLOAT[{len(vector)}]), 0.0)"
             )
+            # BM25 over the indexed text. Unlike the placeholder embeddings this
+            # is a real relevance signal, so it leads the ranking. Rows with no
+            # term in common score NULL, which coalesces to 0 rather than
+            # dropping them -- the tag filter decides membership, this decides
+            # order.
+            relevance = (
+                "coalesce(fts_main_decisions.match_bm25("
+                f"id, {sql_literal(query_text)}), 0.0)"
+            )
         else:
             similarity = "0.0"
+            relevance = "0.0"
 
         where = []
         if tags:
@@ -206,23 +247,25 @@ class DecisionStore:
             where.append(f"developer_id IS DISTINCT FROM {sql_literal(exclude_developer)}")
         if query_text and min_similarity > 0:
             where.append(f"{similarity} >= {float(min_similarity)}")
+        if query_text and min_relevance > 0:
+            where.append(f"{relevance} >= {float(min_relevance)}")
         clause = f"WHERE {' AND '.join(where)}" if where else ""
 
         rows = self.sql(
             f"""
             SELECT {', '.join(_COLUMNS)},
                    {overlap} AS tag_overlap,
+                   {relevance} AS relevance,
                    {similarity} AS similarity
             FROM decisions
             {clause}
             ORDER BY
-                -- Tags lead, similarity breaks ties. Deliberately this way
-                -- round: with mock_embed every vector points roughly the same
-                -- direction, so cosine lands in a ~0.95-0.98 band for any pair
-                -- of texts -- measured, and in that band an unrelated sentence
-                -- can outscore a related one. Tag overlap is the signal that
-                -- actually carries information today. Flip these two lines
-                -- once a real embedding model is in.
+                -- BM25 first: it is the only text signal here that means
+                -- anything today. Tag overlap comes next, and cosine last --
+                -- with mock_embed every vector points roughly the same way, so
+                -- cosine sits in a ~0.95-0.98 band for any pair of texts and an
+                -- unrelated sentence can outscore a related one. Both measured.
+                relevance DESC,
                 tag_overlap DESC,
                 similarity DESC,
                 CASE seniority_level WHEN 'senior' THEN 0 WHEN 'mid' THEN 1 ELSE 2 END,
@@ -231,7 +274,10 @@ class DecisionStore:
             LIMIT {int(limit)}
             """
         )
-        return [dict(zip((*_COLUMNS, "tag_overlap", "similarity"), row)) for row in rows]
+        return [
+            dict(zip((*_COLUMNS, "tag_overlap", "relevance", "similarity"), row))
+            for row in rows
+        ]
 
     def count(self) -> int:
         return self.sql("SELECT count(*) FROM decisions")[0][0]
@@ -241,6 +287,18 @@ class DecisionStore:
         return self.sql(
             "SELECT id, decision_summary FROM decisions "
             f"WHERE embedding IS NULL ORDER BY created_at LIMIT {int(limit)}"
+        )
+
+    def rebuild_fts_index(self) -> None:
+        """Rebuild the text index on the server.
+
+        Runs as an ordinary client: the index lives in the central database and
+        nothing about it exists on this machine. The server auto-loads the fts
+        extension on demand, unlike vss, which had to be loaded at startup.
+        """
+        self.sql(
+            "PRAGMA create_fts_index('decisions', 'id', "
+            "'decision_summary', 'rationale', overwrite=1)"
         )
 
     def set_embedding(self, decision_id: str, vector: list[float], dim: int) -> None:

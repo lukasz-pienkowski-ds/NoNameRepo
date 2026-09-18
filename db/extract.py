@@ -27,14 +27,15 @@ from common.sessions import PROVIDERS, detect, iter_messages  # noqa: E402
 from common.tags import unknown_tags  # noqa: E402
 
 
-def collect(providers: list[str] | None, developer: str, seniority: str) -> tuple[list[dict], list[str]]:
+def collect(providers: list[str] | None, developer: str, seniority: str,
+            root: Path | None = None) -> tuple[list[dict], list[str]]:
     # Keyed by id, not a list: the same message legitimately shows up more than
     # once in a scan (gemini repeats messages inside "$set" snapshots), and the
     # id is what makes re-reading a session harmless in the first place.
     records: dict[str, dict] = {}
     problems: list[str] = []
 
-    for message in iter_messages(providers):
+    for message in iter_messages(providers, root):
         for index, payload in enumerate(find_blocks(message.text)):
             where = f"{message.source_file.name} [{message.decision_id}]"
             try:
@@ -68,6 +69,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--detect", action="store_true", help="list providers found on this machine and exit")
     parser.add_argument("--provider", nargs="*", default=None, choices=list(PROVIDERS))
+    parser.add_argument("--root", type=Path, default=None,
+                        help="read sessions from this directory instead of the CLI's own")
     parser.add_argument("--developer", default="unknown")
     parser.add_argument("--seniority", default="senior", choices=["junior", "mid", "senior"])
     parser.add_argument("--dry-run", action="store_true", help="parse and print, write nothing")
@@ -76,12 +79,12 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.detect:
-        for name, count in detect().items():
+        for name, count in detect(args.root).items():
             mark = "" if PROVIDERS[name]["verified"] else "  [adapter unverified]"
             print(f"{name:8} {count:4} session file(s){mark}")
         return 0
 
-    records, problems = collect(args.provider, args.developer, args.seniority)
+    records, problems = collect(args.provider, args.developer, args.seniority, args.root)
 
     for problem in problems:
         # Loud, because a rejected marker is a decision that will not be there

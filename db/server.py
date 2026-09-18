@@ -27,11 +27,37 @@ DEFAULT_PORT = 8888
 MIN_TOKEN_LENGTH = 4  # enforced by quack_serve itself
 
 
+# Columns the text search covers. decision_summary is what was decided,
+# rationale is why -- and the why is usually where a situation is described in
+# the words someone would later search with.
+FTS_COLUMNS = ("decision_summary", "rationale")
+
+
+def rebuild_fts_index(con: duckdb.DuckDBPyConnection) -> None:
+    """(Re)build the full-text index over `decisions`.
+
+    DuckDB's FTS index is a set of plain tables in the database file, so it
+    survives restarts -- but it does not update itself when rows change. It has
+    to be rebuilt, which is why this is a function rather than a line in
+    schema.sql. Measured: 0.08 s at 500 rows, 0.29 s at 50k.
+
+    Note `overwrite=1`, not `overwrite:=1`. The colon form is rejected with
+    "PRAGMA create_fts_index(VARCHAR, VARCHAR)", and if stderr is redirected it
+    looks like a fast success while leaving no index behind.
+    """
+    columns = ", ".join(f"'{c}'" for c in FTS_COLUMNS)
+    con.execute(f"PRAGMA create_fts_index('decisions', 'id', {columns}, overwrite=1)")
+
+
 def open_db(db_path: Path) -> duckdb.DuckDBPyConnection:
     """Open (creating if needed) the central database and apply the schema."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect(str(db_path))
     con.execute(SCHEMA_PATH.read_text())
+    # Built here so the index always exists, even on a brand new database.
+    # Without it every query would have to check first, or handle the error.
+    # Creating one over an empty table is legal and costs nothing.
+    rebuild_fts_index(con)
     return con
 
 

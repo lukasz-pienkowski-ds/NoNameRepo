@@ -119,7 +119,7 @@ puste**, żeby się nie parsowały. `marker.TEMPLATE` tak właśnie robi.
 | Kto generuje `id` | nikt — bierze się z transportu | `client.insert_decisions` **odrzuca** rekord bez `id` zamiast go dogenerować |
 | Wyszukiwanie | `array_cosine_similarity`, funkcja rdzeniowa | zweryfikowane: działa przy zerowej liczbie rozszerzeń. `vss` nie jest ładowany |
 | Indeks ANN | brak | przy kilkudziesięciu wierszach pełny skan bije utrzymanie indeksu |
-| Kolejność rankingu | **tagi sortują, podobieństwo rozstrzyga remisy** | patrz punkt 5 — przy `mock_embed` podobieństwo jest szumem |
+| Kolejność rankingu | **BM25 sortuje, potem tagi, wektory na końcu** | patrz punkt 5 — BM25 to realny sygnał, `mock_embed` jest szumem |
 | Embeddingi | na centrali, asynchronicznie po `embedding IS NULL` | zapis z laptopa nie czeka na model; padnięty model nie blokuje zapisów |
 | Destylacja LLM | brak w ścieżce ekstrakcji | `<decision_log>` wyciąga się `LIKE`-iem, za darmo i deterministycznie |
 | Graf krawędzi decyzji | nie budujemy | przy kilkunastu rekordach nikt ich nie utworzy |
@@ -150,7 +150,7 @@ wiadomości, 468 unikalnych `uuid`, identycznych przy powtórnym odczycie.
 
 ---
 
-## 5. Dlaczego tagi sortują przed podobieństwem
+## 5. Dlaczego BM25 sortuje przed tagami, a wektory nic nie wnoszą
 
 `mock_embed` z `common/embeddings.py` sumuje skróty bajtów bez zmiany znaku,
 więc wszystkie wektory celują w tę samą stronę. Zmierzone:
@@ -164,11 +164,35 @@ Rozpiętość na pięciu niezwiązanych tekstach: 0.0335. Zdanie o kocie wygrywa
 z powiązanym tematem. To nie jest błąd w okablowaniu — tak zachowuje się
 atrapa oparta na haszu. Dwie konsekwencje, dopóki jest w użyciu:
 
-- **`tag_overlap` sortuje pierwszy** — to jedyny sygnał niosący informację;
-- **`min_similarity` domyślnie 0** i nic nie odcina; odcina filtr po tagach.
+Dlatego wyszukiwanie po treści robi **BM25 z indeksu FTS DuckDB** (kolumny
+`decision_summary` i `rationale`), a nie wektory. Kolejność w `ORDER BY`:
+`relevance` (BM25), potem `tag_overlap`, na końcu `similarity`.
 
-Gdy wejdzie prawdziwy model: zamienić dwie linie w `ORDER BY` w `client.py`
-i podnieść próg. Jest tam komentarz, który to mówi.
+To samo pytanie przed i po:
+
+| Ranking | Pierwsze trafienie dla „dostawca ponawia webhooki, podwojne obciazenia" |
+|---|---|
+| cosine po `mock_embed` | „Migracja w dwoch przebiegach" — źle, poprawna odpowiedź poza pierwszą trójką |
+| BM25 | „Idempotency-key na zapisach z zewnatrz", wynik 3.77, reszta 0 |
+
+`--min-relevance` jest progiem, który realnie odcina. `--min-similarity`
+zostaje na dzień, w którym wejdzie prawdziwy model embeddingowy.
+
+**Czego BM25 nie robi:** dopasowuje wspólne słowa, nie znaczenie. Pytanie
+synonimami („kolejka komunikatów" zamiast „webhooki") nie trafi.
+
+**Indeks:** sześć zwykłych tabel w pliku bazy, więc **przeżywa restart** — bez
+flagi eksperymentalnej, inaczej niż HNSW. Ale **nie aktualizuje się sam**:
+wiersz dodany po ostatniej przebudowie ma `NULL`. Przebudowuje go
+`worker_embeddings.py` po każdej partii embeddingów, czyli dokładnie dla
+nowych i zmienionych rekordów. Koszt: 0,08 s przy 500 wierszach, 0,29 s przy 50 tys.
+
+Klient nie potrzebuje niczego — ani indeksu, ani rozszerzenia `fts`, ani pliku
+bazy. Serwer doładowuje `fts` sam, inaczej niż `vss`.
+
+**Składnia to `overwrite=1`, nie `overwrite:=1`.** Wersja z dwukropkiem jest
+odrzucana, a przy przekierowanym stderr wygląda jak sukces w 0,02 s, nie
+zostawiając indeksu. Dwa moje pierwsze pomiary były właśnie takie.
 
 ---
 
@@ -208,6 +232,17 @@ Jeśli wracasz do tego od zera, to jest lista rzeczy, o które się potkniesz.
    trafił w usługę, która jeszcze wstawała. Przyczyny nie ustaliłem — jeśli
    zobaczysz to przed demem, po prostu powtórz polecenie.
 
+7c. **Po edycji kodu trzeba przebudować obraz**, zanim `make test` cokolwiek
+   pokaże. Kod jest zapieczony w obrazie (wolumen montuje tylko `./data`, celowo,
+   żeby serwer nie zmieniał się sam pod sobą), więc `make test` bez `make build`
+   uruchamia poprzednią wersję. Objawia się to jako test, który pada na hoście
+   i przechodzi w kontenerze albo odwrotnie.
+
+7d. **Token po stronie hosta bierze się z `.env`.** `docker compose` czytał ten
+   plik od początku, ale `python db/cli.py ...` na hoście nie — i kończyło się to
+   komunikatem „Could not find a Quack authentication token" z wnętrza quacka.
+   `db/client.py` czyta teraz ten sam `.env`; zmienne środowiskowe nadal wygrywają.
+
 7b. **Nie kotwicz ścieżek na nazwie `tmp`.** Projekt Gemini brałem jako segment
    po `tmp` — na macOS działało, a w kontenerze `/tmp/...` trafiało w systemowy
    katalog i test padał. Kotwica jest teraz na `chats/`. Testy w kontenerze
@@ -226,7 +261,7 @@ Jeśli wracasz do tego od zera, to jest lista rzeczy, o które się potkniesz.
 
 - `make test` → `test_smoke.py`, **30 asercji**, bez serwera i bez frameworka:
   kontrakt znacznika, odczyt obu formatów sesji, ekstrakcja.
-- `make test-integration` → `test_integration.py`, **17 asercji** przeciw
+- `make test-integration` → `test_integration.py`, **23 asercje** przeciw
   działającej centrali: idempotencja, dedup duplikatu `id` w jednym `INSERT`,
   kolejka embeddingów, wyszukiwanie, pętla zwrotna, 30 równoległych zapisów
   od 3 klientów.
@@ -316,7 +351,7 @@ db/worker_embeddings.py uzupelnia NULL-e; klient quack, nie otwiera pliku
 db/extract.py           skan sesji -> decyzje -> centrala
 db/cli.py               status / load / find / confirm
 test_smoke.py           testy offline, 30 asercji (make test)
-test_integration.py     testy przeciw dzialajacej centrali, 17 asercji
+test_integration.py     testy przeciw dzialajacej centrali, 23 asercje
 data/seed/decisions.jsonl   6 rekordow demo, w tym scenariusz DuckDB-vs-beads
 data/db/decisions.duckdb    plik centrali (gitignorowany)
 
@@ -328,6 +363,8 @@ docs/                   ten plik, SCENARIUSZ.md, CENTRAL-STORE.md
 ```
 
 `docs/SCENARIUSZ.md`: scenariusz w punktach, z mapą „krok → co przetestowane".
+`DEMO.md` w katalogu głównym: przebieg demo krok po kroku, z listą rzeczy,
+których nie wolno obiecywać ze sceny.
 `docs/CENTRAL-STORE.md`: referencja techniczna (EN).
 
 Dokumenty koncepcyjne są w `../../hackathon_2026/docs/`:

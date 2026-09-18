@@ -55,7 +55,7 @@ granice. Stan na 18 września 2026.
 | 4c. Wysyłka do centrali | ✅ | 8 asercji + test na żywo |
 | 5. Centrala w kontenerze | ✅ | build, healthcheck, dostęp z hosta, trwałość po restarcie |
 | 5b. Embeddingi asynchroniczne | ✅ | worker sam podchwycił 6 rekordów po `load` |
-| 6-7. Zapytanie o precedens | ✅ | filtr po tagach, ranking, próg, brak trafień jako wynik |
+| 6-7. Zapytanie o precedens | ✅ | BM25 po treści, filtr po tagach, próg, brak trafień jako wynik |
 | 8. **Tryby grill / precedens** | ❌ **brak** | zaprojektowane, nieistniejące w kodzie |
 | 9. Pętla zwrotna po review | ✅ | `UPDATE` po `id`, status zmieniony |
 
@@ -74,7 +74,7 @@ przechodzą na hoście i w kontenerze:
 - ekstrakcja (8): zebrane decyzje, brak duplikatu z `$set`, provider w rekordzie,
   założenia obecne, tag spoza słownika zgłoszony i niezapisany
 
-**Na żywo, przeciw działającej centrali** (`make test-integration`) — 17 asercji:
+**Na żywo, przeciw działającej centrali** (`make test-integration`) — 23 asercje:
 idempotencja przy 4 przebiegach, odrzucenie rekordu bez `id`, dedup duplikatu
 `id` w jednym `INSERT`, kolejka embeddingów, wyszukiwanie działające zanim
 policzą się wektory, reingest niekasujący wektorów, zmiana treści wracająca do
@@ -115,8 +115,13 @@ przez opublikowany port w obie strony, trwałość danych po `down` + `up`.
 - **Adapter codex napisany na ślepo**, brak instalacji do sprawdzenia.
 - **Dostęp z drugiej maszyny niesprawdzony** — wszystko szło host ↔ kontener
   na jednym komputerze.
-- **Ranking semantyczny jest atrapą.** `mock_embed` to hasz, nie model;
-  kolejność niosą tagi, nie wektory.
+- **Ranking tekstowy to BM25, nie model.** Dopasowuje wspólne słowa, nie
+  znaczenie — pytanie synonimami nie trafi. `mock_embed` pozostaje atrapą
+  i nie wnosi nic do kolejności.
 - **Wszystko, co opisuje znaczniki, zawiera znacznik.** Ekstraktor wciągnął
   przykład zacytowany w rozmowie. Konwencja: przykłady zostawiają jedno
   wymagane pole puste.
+
+---
+
+Przebieg demo krok po kroku: `DEMO.md` w katalogu głównym repo.

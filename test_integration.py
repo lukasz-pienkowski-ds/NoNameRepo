@@ -112,13 +112,55 @@ def run(store: DecisionStore) -> None:
     print("\n[wyszukiwanie]")
     hits = store.find_precedent(tags=["testowanie"], limit=10)
     check("filtr po tagu", len([h for h in hits if h["project"] == PROJECT]), 3)
-    check("brak trafien to pusta lista", store.find_precedent(tags=["autoryzacja"]), [])
+    # Asking for more overlap than the query has tags cannot match anything, so
+    # this stays empty whatever else the store holds. An earlier version picked
+    # a tag it assumed nobody used, and broke the moment real data arrived.
+    check("brak trafien to pusta lista",
+          store.find_precedent(tags=["testowanie"], min_tag_overlap=2), [])
     check("prog similarity odcina",
           store.find_precedent(query_text="x", tags=["testowanie"], min_similarity=0.999), [])
 
     store.insert_decisions([record(7, developer="ktos-inny")])
     hits = store.find_precedent(tags=["testowanie"], exclude_developer="ktos-inny", limit=10)
     check("wykluczenie autora", any(h["developer_id"] == "ktos-inny" for h in hits), False)
+
+    print("\n[wyszukiwanie pelnotekstowe BM25]")
+    store.insert_decisions([
+        record(20, decision_summary="Klucz idempotencji na zapisach przychodzacych",
+               rationale="dostawca ponawia webhooki, wiec bez klucza dostawalismy duplikaty"),
+        record(21, decision_summary="Partycjonowanie tabeli po miesiacu",
+               rationale="kasowanie starych wierszy blokowalo zapisy na kilkanascie sekund"),
+    ])
+    store.rebuild_fts_index()
+
+    hits = store.find_precedent(query_text="dostawca ponawia webhooki duplikaty",
+                                tags=["testowanie"], limit=1)
+    check("BM25 znajduje wlasciwy rekord",
+          hits[0]["decision_summary"] if hits else None,
+          "Klucz idempotencji na zapisach przychodzacych")
+    check("BM25 dal niezerowy wynik", bool(hits and hits[0]["relevance"] > 0), True)
+
+    hits = store.find_precedent(query_text="kasowanie starych wierszy blokowalo zapisy",
+                                tags=["testowanie"], limit=1)
+    check("BM25 rozroznia dwa podobne rekordy",
+          hits[0]["decision_summary"] if hits else None,
+          "Partycjonowanie tabeli po miesiacu")
+
+    check("prog BM25 odcina bezsens",
+          store.find_precedent(query_text="konfiguracja drukarki iglowej w kadrach",
+                               tags=["testowanie"], min_relevance=0.5), [])
+
+    # A record added after the last rebuild must be invisible to BM25: that is
+    # what makes the worker's rebuild necessary rather than optional.
+    store.insert_decisions([record(22, decision_summary="Zupelnie nowy wpis",
+                                   rationale="telemetria satelitarna w kwantowym kompilatorze")])
+    before = store.find_precedent(query_text="telemetria satelitarna kwantowym",
+                                  tags=["testowanie"], min_relevance=0.1)
+    store.rebuild_fts_index()
+    after = store.find_precedent(query_text="telemetria satelitarna kwantowym",
+                                 tags=["testowanie"], min_relevance=0.1)
+    check("nowy rekord niewidoczny przed przebudowa", before, [])
+    check("widoczny po przebudowie", len(after), 1)
 
     print("\n[petla zwrotna]")
     store.set_status(f"{PROJECT}:tester:1", "confirmed")

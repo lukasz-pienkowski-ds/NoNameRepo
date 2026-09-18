@@ -152,27 +152,50 @@ vss would only buy an HNSW index, which at a few dozen rows costs more to
 maintain than the full scan it replaces. Rows still waiting for the embedding
 worker score 0 rather than dropping out of results.
 
-### Tags lead the ranking, similarity breaks ties
+### BM25 leads the ranking
 
-Deliberately this way round, because of a measured property of the placeholder
-embeddings. `mock_embed` sums hashed bytes without sign variation, so every
-vector points in roughly the same direction and cosine similarity lands in a
-~0.95-0.98 band for **any** pair of texts:
+Text search is DuckDB's own FTS index over `decision_summary` and `rationale`.
+It is a real relevance signal, so it sorts first; tag overlap comes next.
+
+The placeholder embeddings sort last and contribute nothing. `mock_embed` sums
+hashed bytes without sign variation, so every vector points roughly the same
+way and cosine lands in a ~0.95-0.98 band for **any** pair of texts:
 
 ```
 partycjonowanie  vs  cache TTL                       0.9768
 partycjonowanie  vs  "rudy kot spi na parapecie"     0.9801   <-- higher
 ```
 
-An unrelated sentence outscoring a related one is not a bug in the wiring, it
-is what a hash-based stand-in does. Two consequences while it is in place:
+Same query, before and after BM25 went in:
 
-- **tag overlap is the signal that carries information**, so it sorts first;
-- **`min_similarity` cannot separate anything** and defaults to 0 -- the tag
-  filter is what does the cutting.
+| Ranking | Top hit for "dostawca ponawia webhooki, podwojne obciazenia" |
+|---|---|
+| cosine over mock_embed | "Migracja w dwoch przebiegach" — wrong, and the right answer was not in the top 3 |
+| BM25 | "Idempotency-key na zapisach z zewnatrz", score 3.77, everything else 0 |
 
-Both reverse once a real model is in: flip the two `ORDER BY` lines in
-`client.py` and raise the threshold.
+`--min-relevance` is therefore a threshold that means something, and is what
+makes "no hits" a real answer. `--min-similarity` stays for the day a real
+embedding model replaces `mock_embed`; today it cannot separate anything.
+
+**What BM25 does not do:** it matches shared words, not meaning. Asking with
+synonyms ("kolejka komunikatow" for "webhooki") will not find the record.
+
+### The index lives on the server and has to be rebuilt
+
+Measured, not assumed:
+
+- It is six ordinary tables inside the database file, so it **survives restarts**
+  — no experimental flag, unlike HNSW.
+- It does **not** update itself. A row inserted after the last rebuild scores
+  NULL. `worker_embeddings.py` rebuilds after every batch it embeds, which is
+  exactly the set of new or edited rows.
+- Rebuild cost: 0.08 s at 500 rows, 0.29 s at 50k.
+- Clients need nothing: no index, no `fts` extension, no database file. The
+  server auto-loads `fts` on demand — unlike `vss`, which had to be loaded at
+  startup or `CREATE INDEX` failed.
+- The syntax is `overwrite=1`, **not** `overwrite:=1`. The colon form is
+  rejected, and with stderr redirected it looks like a fast success that leaves
+  no index behind.
 
 ## Embeddings are computed here, asynchronously
 
@@ -247,7 +270,7 @@ the register of *"the team already solved this"*.
 ## Status
 
 Both test files live in the repo and are runnable by anyone:
-`make test` (30 offline assertions) and `make test-integration` (17 against a
+`make test` (30 offline assertions) and `make test-integration` (23 against a
 running store). The integration file writes only under its own project name and
 deletes it afterwards, so it is safe against a store holding real decisions; it
 skips with exit 0 when no store is reachable, but fails loudly on a rejected
