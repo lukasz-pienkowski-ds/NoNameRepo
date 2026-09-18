@@ -1,95 +1,76 @@
-# hackaton_26
+# NoNameRepo — central decision store
 
-Template project: a DuckDB-backed context store served over HTTP by a small
-API (`db/server.py`), fed and queried by Claude Code skills that are plain
-network clients — the store can be this repo's docker-compose stack, or a
-real server somewhere else; the skills don't care which.
+Decisions taken while working with an agent, harvested from session logs and
+shared across the team. One DuckDB process owns the database and serves it to
+every machine over the `quack` protocol.
+
+Built for the "DuckLake & Grill-Me" hackathon: senior developers' decisions are
+collected automatically from their agent sessions, and a junior's agent later
+uses them to ask the right question rather than hand over the answer.
 
 ## Layout
 
 ```
-Makefile                               make targets: build/up/down the server, ingest/query/context clients, ui
-pyproject.toml, uv.lock                Server-side deps (duckdb), installed with uv inside the Docker image
-db/schema.sql                          DuckDB table definition (documents, incl. an ASSUMED domain/model_name pair)
-db/init_db.py                          Creates/opens data/db/context.duckdb and applies the schema
-db/store.py                            Server-side ingest/query/context logic (plain functions over a DuckDB connection)
-db/server.py                           HTTP JSON API in front of the store (/health, /ingest, /query, /context)
-db/serve_ui.py                         Serves DuckDB's web UI/SQL console on a port (default 4213), read-only
-common/embeddings.py                   Mock tagging + embedding functions (swap these for real models later), server-side only
-data/raw/sample.jsonl                  Example input data (generic topics)
-data/raw/sample_sessions.jsonl         Example input data shaped like tagged Claude Code sessions (domain/model)
-data/db/context.duckdb                 Generated DuckDB file (gitignored), owned by the server process
-docker/Dockerfile, docker-compose.yml  Runs db/server.py (and db/serve_ui.py) without a local Python env
-.claude/skills/tag-and-ingest/         Skill: POST a JSONL file to the server to be tagged, embedded, and upserted
-.claude/skills/query-context/          Skill: POST a query, get back top-k similar documents
-.claude/skills/project-context/        Skill: POST a domain, get back its grouped context + how to apply it
+common/sessions.py         Reads agent sessions from any CLI (claude/gemini/codex)
+common/marker.py           The <decision_log> contract and its parser
+common/tags.py             Frozen tag vocabulary, shared with the skill
+common/embeddings.py       mock_embed — the designated swap point for a real model
+
+db/decisions_schema.sql    The `decisions` table
+db/server.py               The store itself, served over quack
+db/client.py               How every machine talks to it
+db/worker_embeddings.py    Fills in missing embeddings, asynchronously
+db/extract.py              Scan agent sessions -> decisions -> store
+db/cli.py                  status / load / find / confirm
+
+test_smoke.py              30 offline checks (`make test`)
+test_integration.py        23 checks against a running store (`make test-integration`)
+data/seed/decisions.jsonl  Demo decisions
+docs/                      CENTRAL-STORE.md, HANDOVER.md, SCENARIUSZ.md
 ```
+
+## Quickstart
+
+```bash
+cp .env.example .env     # set QUACK_TOKEN (4 characters minimum)
+make up                  # store + embedding worker
+make seed                # load demo decisions
+make find TAGS=persystencja
+make detect              # which LLM CLIs have sessions on this machine
+make extract             # harvest decisions from them
+make test-all            # 30 offline + 23 integration checks
+```
+
+Then search by describing a situation in your own words:
+
+```bash
+.venv/bin/python db/cli.py find --query "dostawca ponawia webhooki i dostajemy podwojne obciazenia"
+```
+
+Ranking is BM25 over DuckDB's own full-text index — shared words, not meaning.
+`DEMO.md` walks through the whole scenario.
+
+`make help` lists the rest. Everything runs in the `docker/Dockerfile` image;
+nothing is needed on the host besides Docker.
+
+## Why a server and not a shared file
+
+A DuckDB file allows exactly one writing process, so three laptops pointing at a
+shared file deadlock or corrupt it. Here a single process owns the file and
+every write is funnelled through it, which serialises them by construction.
+
+The consequence is a rule: **nothing else may open
+`data/db/decisions.duckdb` while the store runs** — not even a read-only script
+on the same host. It fails with `Could not set lock on file`. Everything
+connects as a client.
 
 ## Status
 
-This is a mock/scaffold: tagging and embeddings in `common/embeddings.py`
-are deterministic placeholders (keyword matching + a hashed pseudo-vector),
-not a real model. They make the ingest → store → query pipeline runnable
-end to end; swap that one file for a real embedding/tagging model later
-without touching the schema, the server, or the skills.
+The store, the session readers and the extractor are done and tested. The skill
+that emits `<decision_log>` markers, and the grill/precedent modes that read
+them back, are designed but not written — see `docs/SCENARIUSZ.md` for exactly
+which steps are covered and which are not.
 
-The `domain` and `model_name` columns on `documents` (see `db/schema.sql`)
-are an **assumed placeholder schema**, guessed at ahead of the real
-ingestion schema that will populate this table from tagged/embedded Claude
-Code session JSONL. When that schema is delivered, `db/schema.sql` and
-`db/store.py` are the only files that reference those column names —
-nothing else depends on their shape.
-
-## Architecture: client/server, not docker-exec
-
-The store is **not** something skills reach by running inside a container.
-`db/server.py` is a long-running HTTP JSON API that owns the DuckDB file,
-the schema, and the tagging/embedding logic. Skills
-(`.claude/skills/*/scripts/*.py`) are plain-stdlib HTTP clients — no
-`duckdb` import, no filesystem access to the `.duckdb` file, no Docker
-requirement of their own. They just POST to `CONTEXT_STORE_URL`, wherever
-that happens to point:
-
-- pointed at `http://localhost:8000`, that's this repo's own docker-compose `context-store` service
-- pointed at `http://some-host:8000`, that's a `db/server.py` running on any other machine — same skill code, no changes needed
-
-Only the **server** needs Docker (or a Python host with `duckdb` installed);
-the skills that consume it need nothing but the standard library and
-network access.
-
-## Quickstart (via Makefile)
-
-```bash
-make up                                      # build + start context-store at http://localhost:8000
-make ingest                                  # tag+embed data/raw/sample.jsonl, POST it to the server
-make ingest FILE=data/raw/sample_sessions.jsonl  # or ingest the mock session data
-make query Q="how does docker compose work"  # top-5 similar docs, as JSON
-make context DOMAIN=hackaton_26              # this project's context, grouped by topic
-make context DOMAIN=billing-service MODEL=claude-sonnet-5
-make ui                                      # web SQL console at http://localhost:4213 (read-only)
-make down                                    # stop the server
-```
-
-`make help` lists all targets. `CONTEXT_STORE_URL` (default
-`http://localhost:8000`) controls where `ingest`/`query`/`context` connect —
-override it to point at a remote server instead: `make query Q="..." CONTEXT_STORE_URL=http://1.2.3.4:8000`.
-
-The equivalent raw commands, if you'd rather skip make:
-
-```bash
-docker compose up -d --build context-store   # starts the API on http://localhost:8000
-python3 .claude/skills/tag-and-ingest/scripts/ingest.py data/raw/sample_sessions.jsonl --url http://localhost:8000
-python3 .claude/skills/query-context/scripts/query.py "how does docker compose work" --url http://localhost:8000
-python3 .claude/skills/project-context/scripts/project_context.py hackaton_26 --url http://localhost:8000
-docker compose up context-ui                 # web UI on http://localhost:4213 (runs until stopped)
-```
-
-`context-ui` uses `network_mode: host` (Linux only) because DuckDB's `ui`
-extension only binds to 127.0.0.1 inside its own process — a normal
-`ports:` mapping wouldn't be reachable from the host.
-
-## Skills
-
-- **tag-and-ingest**: point it at a local JSONL file of `{"text": ...}` records (optionally with `domain`/`model`); it POSTs the file to the server, which tags and embeds each line and upserts it into `documents`.
-- **query-context**: give it a query string; the server embeds it and returns the top-k most similar documents by cosine similarity, for use as grounding context. Generic, whole-store search.
-- **project-context**: give it a domain (and optionally a model/tags/query); it returns that project's context grouped by topic, and — this is the point of it — tells the agent how to actually apply it: follow existing conventions as precedent, resolve conflicts by recency, cite doc ids, and say plainly when a domain has no context yet instead of inventing conventions.
+`docs/CENTRAL-STORE.md` is the technical reference. `docs/HANDOVER.md` (PL)
+explains the reasoning and the traps. `docs/SCENARIUSZ.md` (PL) maps the
+scenario onto test coverage.
