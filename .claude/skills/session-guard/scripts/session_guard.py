@@ -1,139 +1,115 @@
 #!/usr/bin/env python3
-"""Check a developer's Claude Code session against this project's precedent.
+"""Check a developer's current session against the central decision store.
 
-Parses a session transcript (JSONL, Claude Code's own format), derives a
-domain and a "what's been happening" query from it, and asks the
-context-store server for the matching precedent — grouped by topic
-(server's /context) and, if that domain has little of its own context, also
-ranked across the whole store (server's /query) so cross-project precedent
-isn't missed.
+This is the "precedent" (and, where warranted, "grill") mode from
+docs/SCENARIUSZ.md step 8 -- the half of the scenario the team's own docs
+flag as designed but not written. A junior's agent queries the central store
+for precedent set by others and either hands over the decision + rationale
+(precedent), or, when the retrieved precedent's assumptions don't clearly
+match the current situation, surfaces the constraint as a question instead
+of a ready answer (grill). See SKILL.md for which mode applies when.
 
-This script only fetches; it does not judge. It hands back:
-  - recent_moves: the developer's last N tool actions (edits, writes, bash
-    commands) extracted from the transcript, each as {"type", "detail"}
-  - context: this domain's precedent, ranked by relevance to recent_moves
-  - extra_matches: whole-store matches, only included as a fallback when the
-    domain's own context is thin (see --extra-threshold)
+Talks to the store exactly the way db/cli.py's `find` command does:
+db.client.DecisionStore.find_precedent(query_text=..., limit=...), ranked
+BM25 first (real signal), then tag_overlap, then cosine similarity last
+(mock_embed is measured noise -- see docs/HANDOVER.md #5). No project or
+tag filter is applied here: the whole point of the central store is that
+precedent from someone else's project is exactly what a junior facing a new
+problem needs to find.
 
-Comparing recent_moves against context/extra_matches — deciding what's
-compliant, what conflicts, and what to suggest instead — is the actual job
-of session-guard/SKILL.md, not this script.
+Reads the *current* session with common/sessions.py -- the same,
+already-verified reader the extractor uses -- instead of hand-rolling
+transcript parsing. Auto-finds the most recently modified session file for
+the given provider (default: claude), so no path needs to be supplied by a
+human.
 
-TODO(real-transcript-schema): field names below (`cwd`, `message.content`,
-tool_use blocks) match Claude Code's current transcript format as observed;
-if that format changes, only the parsing in load_transcript() needs to.
+This script only fetches; it does not judge. Comparing recent_moves against
+precedent -- deciding what's compliant, what conflicts, precedent vs. grill,
+and what to suggest instead -- is SKILL.md's job, not this script's.
 """
 
 import argparse
 import json
-import os
-import urllib.request
+import re
+import sys
 from pathlib import Path
 
-DEFAULT_URL = os.environ.get("CONTEXT_STORE_URL", "http://localhost:8000")
+sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+
+from db.client import DEFAULT_TOKEN, DEFAULT_URI, DecisionStore  # noqa: E402
+from common.sessions import Message, session_files, iter_messages  # noqa: E402
 
 
-def load_transcript(path: Path, recent: int) -> tuple[str | None, list[dict], str]:
-    domain = None
-    moves = []
-    texts = []
-
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            if domain is None and rec.get("cwd"):
-                domain = Path(rec["cwd"]).name
-
-            content = (rec.get("message") or {}).get("content")
-            if isinstance(content, str):
-                texts.append(content)
-            elif isinstance(content, list):
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "text" and block.get("text"):
-                        texts.append(block["text"])
-                    elif block.get("type") == "tool_use":
-                        inp = block.get("input", {}) or {}
-                        detail = (
-                            inp.get("file_path")
-                            or inp.get("path")
-                            or inp.get("command")
-                            or json.dumps(inp)[:200]
-                        )
-                        moves.append({"type": block.get("name", "tool"), "detail": detail})
-
-    moves = moves[-recent:]
-    query_text = "\n".join(texts[-recent:] + [m["detail"] for m in moves])[-4000:]
-    return domain, moves, query_text
+def find_current_session(provider: str = "claude") -> Path:
+    files = session_files(provider)
+    if not files:
+        raise FileNotFoundError(f"No {provider} session files found on this machine.")
+    return max(files, key=lambda p: p.stat().st_mtime)
 
 
-def _post(url: str, path: str, payload: dict) -> dict:
-    req = urllib.request.Request(
-        f"{url.rstrip('/')}{path}",
-        data=json.dumps(payload).encode(),
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
+def load_session(path: Path, provider: str, recent: int) -> tuple[str, list[Message]]:
+    """Messages from this one session file, via the shared reader.
+
+    Scoped to the file's own directory (not a full home-directory scan) by
+    passing it as `root` -- session_files/iter_messages then only see
+    session files that live alongside this one.
+    """
+    messages = [m for m in iter_messages([provider], root=path.parent) if m.source_file == path]
+    project = messages[0].project if messages else path.parent.name
+    return project, messages[-recent:]
+
+
+def _strip_decision_log(text: str) -> str:
+    """Drop <decision_log> blocks from the query text.
+
+    Otherwise a message that quotes the marker format (like this docstring's
+    neighbors, or SKILL.md itself) gets treated as if it were a real logged
+    decision -- the exact trap docs/HANDOVER.md #2c warns about, on the read
+    side instead of the extractor's.
+    """
+    return re.sub(r"<decision_log>.*?</decision_log>", "", text, flags=re.DOTALL)
 
 
 def check_session(
-    transcript_path: Path,
-    domain: str | None = None,
+    provider: str = "claude",
+    session_path: Path | None = None,
     top_k: int = 5,
     recent: int = 20,
-    extra_threshold: int = 3,
-    url: str = DEFAULT_URL,
+    uri: str = DEFAULT_URI,
+    token: str = DEFAULT_TOKEN,
 ) -> dict:
-    inferred_domain, moves, query_text = load_transcript(transcript_path, recent)
-    domain = domain or inferred_domain
-    if not domain:
-        raise ValueError(
-            "Could not infer a domain from the transcript (no 'cwd' field found) — pass --domain explicitly."
-        )
+    session_path = session_path or find_current_session(provider)
+    project, messages = load_session(session_path, provider, recent)
 
-    context = _post(url, "/context", {"domain": domain, "query": query_text})
+    query_text = "\n".join(_strip_decision_log(m.text) for m in messages)[-4000:]
+    recent_moves = [{"role": m.role, "text": m.text} for m in messages]
 
-    extra_matches = []
-    if context["count"] < extra_threshold and query_text:
-        seen = {d["id"] for d in context["documents"]}
-        for m in _post(url, "/query", {"text": query_text, "top_k": top_k}):
-            if m["id"] not in seen:
-                extra_matches.append(m)
+    store = DecisionStore(uri=uri, token=token)
+    precedent = store.find_precedent(query_text=query_text, limit=top_k) if query_text else []
 
     return {
-        "domain": domain,
-        "recent_moves": moves,
-        "context": context,
-        "extra_matches": extra_matches,
+        "project": project,
+        "session_file": str(session_path),
+        "recent_moves": recent_moves,
+        "precedent": precedent,
     }
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("transcript_path", type=Path, help="Path to a Claude Code session .jsonl transcript")
-    parser.add_argument("--domain", default=None, help="Override the domain inferred from the transcript's cwd")
-    parser.add_argument("--top-k", type=int, default=5, help="Max whole-store fallback matches")
-    parser.add_argument("--recent", type=int, default=20, help="How many recent messages/tool-calls to consider")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--extra-threshold",
-        type=int,
-        default=3,
-        help="Fetch whole-store fallback matches when domain context count is below this",
+        "session_path",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Path to a session .jsonl file (omit to auto-find the current session)",
     )
-    parser.add_argument("--url", default=DEFAULT_URL, help="context-store base URL (default: %(default)s)")
+    parser.add_argument("--provider", default="claude", choices=["claude", "gemini", "codex"])
+    parser.add_argument("--top-k", type=int, default=5, help="Max precedent matches")
+    parser.add_argument("--recent", type=int, default=20, help="How many recent messages to consider")
+    parser.add_argument("--uri", default=DEFAULT_URI, help="quack:// URI of the central store (default: %(default)s)")
+    parser.add_argument("--token", default=DEFAULT_TOKEN, help="Auth token for the store")
     args = parser.parse_args()
 
-    result = check_session(
-        args.transcript_path, args.domain, args.top_k, args.recent, args.extra_threshold, args.url
-    )
-    print(json.dumps(result, indent=2, default=str))
+    result = check_session(args.provider, args.session_path, args.top_k, args.recent, args.uri, args.token)
+    print(json.dumps(result, indent=2, default=str, ensure_ascii=False))
