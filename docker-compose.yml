@@ -1,9 +1,9 @@
 services:
-  # One-off shell for running init/ingest/query scripts against the shared
-  # ./data/db/context.duckdb file, e.g.:
-  #   docker compose run --rm context-store python db/init_db.py
-  #   docker compose run --rm context-store python .claude/skills/tag-and-ingest/scripts/ingest.py data/raw/sample.jsonl
-  #   docker compose run --rm context-store python .claude/skills/query-context/scripts/query.py "docker compose"
+  # Long-running context-store API: a small HTTP JSON service in front of
+  # DuckDB (db/server.py). Skills reach it as a plain network service at
+  # CONTEXT_STORE_URL — they don't run inside this container or touch the
+  # DuckDB file directly, so the same skill scripts work whether this is
+  # running via this compose stack or on a real remote server.
   context-store:
     build:
       context: .
@@ -12,15 +12,19 @@ services:
       - ./data:/app/data
       - ./common:/app/common
       - ./db:/app/db
-    command: ["python", "db/init_db.py"]
+    ports:
+      - "8000:8000"
+    command: ["python", "-m", "db.server", "--host", "0.0.0.0", "--port", "8000"]
 
   # Serves DuckDB's built-in web UI/SQL console (db/serve_ui.py) at
-  # http://localhost:4213. DuckDB's `ui` extension only binds to 127.0.0.1
-  # inside its process, so a normal `ports:` mapping wouldn't be reachable
-  # from the host — network_mode: host makes the container share the host's
-  # network namespace instead, so the host's own localhost:4213 reaches it.
-  # (Linux only; on Docker Desktop for Mac/Windows run
-  # `uv run python db/serve_ui.py` directly on the host instead.)
+  # http://localhost:4213, for a human to browse the store — separate from
+  # the skills' API above, and read-only (context-store holds the one
+  # read-write connection while it's running). DuckDB's `ui` extension only
+  # binds to 127.0.0.1 inside its own process, so a normal `ports:` mapping
+  # wouldn't be reachable from the host — network_mode: host makes the
+  # container share the host's network namespace instead. (Linux only; on
+  # Docker Desktop for Mac/Windows run `uv run python db/serve_ui.py`
+  # directly on the host instead.)
   context-ui:
     build:
       context: .
