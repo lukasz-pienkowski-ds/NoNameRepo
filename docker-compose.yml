@@ -1,33 +1,46 @@
 services:
-  # One-off shell for running init/ingest/query scripts against the shared
-  # ./data/db/context.duckdb file, e.g.:
-  #   docker compose run --rm context-store python db/init_db.py
-  #   docker compose run --rm context-store python .claude/skills/tag-and-ingest/scripts/ingest.py data/raw/sample.jsonl
-  #   docker compose run --rm context-store python .claude/skills/query-context/scripts/query.py "docker compose"
-  context-store:
+  # --- central decision store -------------------------------------------
+  # One process owns the decisions database and serves it to every machine over
+  # quack. This exists because a DuckDB file allows exactly one writing process,
+  # so pointing three laptops at a shared file deadlocks or corrupts it.
+  #
+  # Nothing else may open data/db/decisions.duckdb while this runs, not even a
+  # read-only script -- it will fail with "Could not set lock on file".
+  #
+  # quack_serve binds whatever address it is given, so a plain ports: mapping
+  # works and network_mode: host is not needed.
+  decision-store:
     build:
       context: .
       dockerfile: docker/Dockerfile
     volumes:
       - ./data:/app/data
-      - ./common:/app/common
-      - ./db:/app/db
-    command: ["python", "db/init_db.py"]
+    environment:
+      QUACK_TOKEN: ${QUACK_TOKEN:-hackathon}
+    ports:
+      - "${QUACK_PORT:-8888}:8888"
+    command: ["python", "db/server.py", "--host", "0.0.0.0", "--port", "8888"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "db/cli.py", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # Serves DuckDB's built-in web UI/SQL console (db/serve_ui.py) at
-  # http://localhost:4213. DuckDB's `ui` extension only binds to 127.0.0.1
-  # inside its process, so a normal `ports:` mapping wouldn't be reachable
-  # from the host — network_mode: host makes the container share the host's
-  # network namespace instead, so the host's own localhost:4213 reaches it.
-  # (Linux only; on Docker Desktop for Mac/Windows run
-  # `uv run python db/serve_ui.py` directly on the host instead.)
-  context-ui:
+  # Fills in missing vectors. A separate service on purpose: it must not open
+  # the database file, so it connects over quack like any other client. It can
+  # be down for as long as you like -- rows queue up with embedding NULL and tag
+  # search keeps working.
+  embedding-worker:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    volumes:
-      - ./data:/app/data
-      - ./common:/app/common
-      - ./db:/app/db
-    network_mode: host
-    command: ["python", "db/serve_ui.py", "--port", "4213"]
+    environment:
+      QUACK_URI: quack://decision-store:8888
+      QUACK_TOKEN: ${QUACK_TOKEN:-hackathon}
+    command: ["python", "db/worker_embeddings.py"]
+    depends_on:
+      decision-store:
+        condition: service_healthy
+    restart: unless-stopped

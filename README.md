@@ -1,62 +1,67 @@
-# hackaton_26
+# NoNameRepo — central decision store
 
-Template project: a DuckDB-backed context store built from JSONL data, run
-in Docker, fed and queried via two Claude Code skills, browsable over a
-network port via DuckDB's built-in web UI.
+Decisions taken while working with an agent, harvested from session logs and
+shared across the team. One DuckDB process owns the database and serves it to
+every machine over the `quack` protocol.
+
+Built for the "DuckLake & Grill-Me" hackathon: senior developers' decisions are
+collected automatically from their agent sessions, and a junior's agent later
+uses them to ask the right question rather than hand over the answer.
 
 ## Layout
 
 ```
-Makefile                               make targets wrapping docker compose (build/init/ingest/query/ui)
-pyproject.toml, uv.lock                Project deps, installed with uv inside the Docker image
-db/schema.sql                          DuckDB table definition (documents, with a fixed-size embedding column)
-db/init_db.py                          Creates/opens data/db/context.duckdb and applies the schema
-db/serve_ui.py                         Serves DuckDB's web UI/SQL console on a port (default 4213)
-common/embeddings.py                   Mock tagging + embedding functions (swap these for real models later)
-data/raw/sample.jsonl                  Example input data
-data/db/context.duckdb                 Generated DuckDB file (gitignored)
-docker/Dockerfile, docker-compose.yml  Container(s) to run the scripts/UI server below without a local Python env
-.claude/skills/tag-and-ingest/         Skill: tag + embed a JSONL file, upsert into DuckDB
-.claude/skills/query-context/          Skill: retrieve top-k similar documents for a query
+common/sessions.py         Reads agent sessions from any CLI (claude/gemini/codex)
+common/marker.py           The <decision_log> contract and its parser
+common/tags.py             Frozen tag vocabulary, shared with the skill
+common/embeddings.py       mock_embed — the designated swap point for a real model
+
+db/decisions_schema.sql    The `decisions` table
+db/server.py               The store itself, served over quack
+db/client.py               How every machine talks to it
+db/worker_embeddings.py    Fills in missing embeddings, asynchronously
+db/extract.py              Scan agent sessions -> decisions -> store
+db/cli.py                  status / load / find / confirm
+
+test_smoke.py              30 offline checks (`make test`)
+test_integration.py        17 checks against a running store (`make test-integration`)
+data/seed/decisions.jsonl  Demo decisions
+docs/                      CENTRAL-STORE.md, HANDOVER.md, SCENARIUSZ.md
 ```
+
+## Quickstart
+
+```bash
+cp .env.example .env     # set QUACK_TOKEN (4 characters minimum)
+make up                  # store + embedding worker
+make seed                # load demo decisions
+make find TAGS=persystencja
+make detect              # which LLM CLIs have sessions on this machine
+make extract             # harvest decisions from them
+make test-all            # 30 offline + 17 integration checks
+```
+
+`make help` lists the rest. Everything runs in the `docker/Dockerfile` image;
+nothing is needed on the host besides Docker.
+
+## Why a server and not a shared file
+
+A DuckDB file allows exactly one writing process, so three laptops pointing at a
+shared file deadlock or corrupt it. Here a single process owns the file and
+every write is funnelled through it, which serialises them by construction.
+
+The consequence is a rule: **nothing else may open
+`data/db/decisions.duckdb` while the store runs** — not even a read-only script
+on the same host. It fails with `Could not set lock on file`. Everything
+connects as a client.
 
 ## Status
 
-This is a mock/scaffold: tagging and embeddings in `common/embeddings.py`
-are deterministic placeholders (keyword matching + a hashed pseudo-vector),
-not a real model. They make the ingest → store → query pipeline runnable
-end to end; swap that one file for a real embedding/tagging model later
-without touching the schema, scripts, or skills.
+The store, the session readers and the extractor are done and tested. The skill
+that emits `<decision_log>` markers, and the grill/precedent modes that read
+them back, are designed but not written — see `docs/SCENARIUSZ.md` for exactly
+which steps are covered and which are not.
 
-## Quickstart (Docker, via Makefile)
-
-```bash
-make init                                    # create data/db/context.duckdb
-make ingest                                  # tag+embed data/raw/sample.jsonl into it
-make ingest FILE=data/raw/other.jsonl        # or ingest your own JSONL file
-make query Q="how does docker compose work"  # top-5 similar docs, as JSON
-make ui                                      # web SQL console at http://localhost:4213
-```
-
-`make help` lists all targets. Everything runs inside the `docker/Dockerfile`
-image (Python + uv-installed deps); nothing needs to be installed on the
-host besides Docker.
-
-The equivalent raw `docker compose` commands, if you'd rather skip make:
-
-```bash
-docker compose build
-docker compose run --rm context-store python db/init_db.py
-docker compose run --rm context-store python .claude/skills/tag-and-ingest/scripts/ingest.py data/raw/sample.jsonl
-docker compose run --rm context-store python .claude/skills/query-context/scripts/query.py "how does docker compose work"
-docker compose up context-ui   # web UI on http://localhost:4213 (runs until stopped)
-```
-
-`context-ui` uses `network_mode: host` (Linux only) because DuckDB's `ui`
-extension only binds to 127.0.0.1 inside its own process — a normal
-`ports:` mapping wouldn't be reachable from the host.
-
-## Skills
-
-- **tag-and-ingest**: point it at a JSONL file of `{"text": ...}` records; it tags and embeds each one and upserts it into `documents`.
-- **query-context**: give it a query string; it embeds the query and returns the top-k most similar documents by cosine similarity, for use as grounding context.
+`docs/CENTRAL-STORE.md` is the technical reference. `docs/HANDOVER.md` (PL)
+explains the reasoning and the traps. `docs/SCENARIUSZ.md` (PL) maps the
+scenario onto test coverage.
