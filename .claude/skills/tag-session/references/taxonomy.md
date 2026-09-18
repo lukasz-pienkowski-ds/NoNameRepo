@@ -1,6 +1,6 @@
-# Taxonomy
+# Labeling vocabulary
 
-Retrieval across projects only works if two people describing the same problem land on the same label. Pick one `domain` and 1–4 `tags`.
+A controlled vocabulary only works if two people describing the same thing land on the same label. Every message gets exactly one `domain` and one to four `tags` drawn from these lists — or `null` and `[]` when the message carries no engineering content at all.
 
 ## Domains (choose exactly one)
 
@@ -20,7 +20,7 @@ Retrieval across projects only works if two people describing the same problem l
 - `performance` — profiling-driven optimization, resource budgets
 - `process` — tooling and workflow choices with engineering consequences
 
-## Subtags (choose 1–4)
+## Tags (choose 1–4)
 
 Pattern and tradeoff axes, deliberately technology-agnostic:
 
@@ -37,10 +37,10 @@ Pattern and tradeoff axes, deliberately technology-agnostic:
 `versioning-strategy`, `data-validation-boundary`, `timezone-handling`, `numeric-precision`,
 `bulk-import`, `third-party-api-limits`, `vendor-lock-in`, `cost-vs-latency`, `legacy-interop`
 
-## Adding a tag
-
-If nothing fits, use the closest existing tag **and** add one more of the form `new:my-proposed-tag`, which marks the record for later curation. Do not silently invent bare tags — a vocabulary that grows by one label per session stops being a vocabulary.
-
 ## Choosing well
 
-Tag the **tradeoff axis**, not the technology. `redis` tells a future reader nothing transferable; `cache-invalidation` plus `push-vs-pull` finds the record from a different stack. Name the technologies in the summary instead.
+Tag the **tradeoff axis, not the technology**. `redis` tells a future reader nothing transferable; `cache-invalidation` plus `push-vs-pull` finds the message again from a different stack. The technology stays in the message text, which is stored verbatim.
+
+## Proposing a new tag
+
+If nothing fits, use the closest existing tag **and** add one more of the form `new:my-proposed-tag`. The writer accepts the `new:` prefix and it marks the label for later curation. Do not silently invent bare tags — a vocabulary that grows by one label per session stops being a vocabulary.
