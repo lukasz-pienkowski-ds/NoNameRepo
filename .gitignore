@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# generated DuckDB files
+data/db/*.duckdb
+data/db/*.duckdb.wal
+
+# local env overrides
+.env

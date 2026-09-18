@@ -1,0 +1,33 @@
+services:
+  # One-off shell for running init/ingest/query scripts against the shared
+  # ./data/db/context.duckdb file, e.g.:
+  #   docker compose run --rm context-store python db/init_db.py
+  #   docker compose run --rm context-store python .claude/skills/tag-and-ingest/scripts/ingest.py data/raw/sample.jsonl
+  #   docker compose run --rm context-store python .claude/skills/query-context/scripts/query.py "docker compose"
+  context-store:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./data:/app/data
+      - ./common:/app/common
+      - ./db:/app/db
+    command: ["python", "db/init_db.py"]
+
+  # Serves DuckDB's built-in web UI/SQL console (db/serve_ui.py) at
+  # http://localhost:4213. DuckDB's `ui` extension only binds to 127.0.0.1
+  # inside its process, so a normal `ports:` mapping wouldn't be reachable
+  # from the host — network_mode: host makes the container share the host's
+  # network namespace instead, so the host's own localhost:4213 reaches it.
+  # (Linux only; on Docker Desktop for Mac/Windows run
+  # `uv run python db/serve_ui.py` directly on the host instead.)
+  context-ui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ./data:/app/data
+      - ./common:/app/common
+      - ./db:/app/db
+    network_mode: host
+    command: ["python", "db/serve_ui.py", "--port", "4213"]

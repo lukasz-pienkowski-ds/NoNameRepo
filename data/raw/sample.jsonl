@@ -1,0 +1,5 @@
+{"id": "doc-001", "text": "DuckDB is an in-process analytical database that supports SQL directly on Parquet, CSV and JSON files.", "source": "sample.jsonl"}
+{"id": "doc-002", "text": "Docker Compose lets you define and run multi-container applications with a single YAML file.", "source": "sample.jsonl"}
+{"id": "doc-003", "text": "Claude Code skills package reusable instructions and scripts that the assistant can invoke on demand.", "source": "sample.jsonl"}
+{"id": "doc-004", "text": "Vector embeddings map text into numeric space so that semantically similar passages end up close together.", "source": "sample.jsonl"}
+{"id": "doc-005", "text": "Retrieval augmented generation grounds a language model's answers in documents fetched from a knowledge base.", "source": "sample.jsonl"}

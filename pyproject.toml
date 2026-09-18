@@ -1,0 +1,8 @@
+[project]
+name = "hackaton-context"
+version = "0.1.0"
+description = "DuckDB context store: tag/embed JSONL into DuckDB, query it back, browse it via DuckDB's web UI"
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=1.1.0",
+]
