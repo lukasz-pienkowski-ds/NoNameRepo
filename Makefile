@@ -1,4 +1,4 @@
-.PHONY: help build up down ingest query context ui clean
+.PHONY: help build up down ingest query context ui clean test
 
 FILE   ?= data/raw/sample.jsonl
 Q      ?= how does docker compose work
@@ -18,6 +18,7 @@ help:
 	@echo "  make query [Q=...] [TOPK=...]  ask the running server for top-k similar docs"
 	@echo "  make context DOMAIN=... [MODEL=...] [TAGS=...] [CTXQ=...]  project context, grouped by topic"
 	@echo "  make ui                   serve DuckDB web UI at http://localhost:4213 (foreground, read-only)"
+	@echo "  make test                 run the unit test suite"
 	@echo "  make clean                remove the generated DuckDB file (stop the server first)"
 	@echo ""
 	@echo "  ingest/query/context are plain network clients (CONTEXT_STORE_URL=$(CONTEXT_STORE_URL))"
@@ -46,6 +47,9 @@ context:
 
 ui: build
 	docker compose up context-ui
+
+test:
+	uv run pytest tests/
 
 clean:
 	rm -f data/db/context.duckdb data/db/context.duckdb.wal
