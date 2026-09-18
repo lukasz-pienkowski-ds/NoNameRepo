@@ -1,4 +1,4 @@
-.PHONY: help build up down ingest query context guard ui clean
+.PHONY: help build up down ingest query context guard ui clean test
 
 FILE    ?= data/raw/sample.jsonl
 Q       ?= how does docker compose work
@@ -21,6 +21,7 @@ help:
 	@echo "  make context DOMAIN=... [MODEL=...] [TAGS=...] [CTXQ=...]  project context, grouped by topic"
 	@echo "  make guard SESSION=<transcript.jsonl> [GDOMAIN=...]  check a dev session's moves against precedent"
 	@echo "  make ui                   serve DuckDB web UI at http://localhost:4213 (foreground, read-only)"
+	@echo "  make test                 run the unit test suite"
 	@echo "  make clean                remove the generated DuckDB file (stop the server first)"
 	@echo ""
 	@echo "  ingest/query/context/guard are plain network clients (CONTEXT_STORE_URL=$(CONTEXT_STORE_URL))"
@@ -53,6 +54,9 @@ guard:
 
 ui: build
 	docker compose up context-ui
+
+test:
+	uv run pytest tests/
 
 clean:
 	rm -f data/db/context.duckdb data/db/context.duckdb.wal
