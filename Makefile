@@ -1,51 +1,95 @@
-.PHONY: help build up down ingest query context ui clean
+.PHONY: help build up down logs wait-store status seed find detect extract test test-integration test-all shell clean
 
-FILE   ?= data/raw/sample.jsonl
-Q      ?= how does docker compose work
-TOPK   ?= 5
-DOMAIN ?= hackaton_26
-MODEL  ?=
-TAGS   ?=
-CTXQ   ?=
-
-CONTEXT_STORE_URL ?= http://localhost:8000
+SEED  ?= data/seed/decisions.jsonl
+TAGS  ?= skalowanie
+LIMIT ?= 3
 
 help:
-	@echo "  make build                build the docker image"
-	@echo "  make up                   start the context-store server in the background at $(CONTEXT_STORE_URL)"
-	@echo "  make down                 stop the context-store server (and ui, if running)"
-	@echo "  make ingest [FILE=...]    tag+embed a JSONL file by sending it to the running server"
-	@echo "  make query [Q=...] [TOPK=...]  ask the running server for top-k similar docs"
-	@echo "  make context DOMAIN=... [MODEL=...] [TAGS=...] [CTXQ=...]  project context, grouped by topic"
-	@echo "  make ui                   serve DuckDB web UI at http://localhost:4213 (foreground, read-only)"
-	@echo "  make clean                remove the generated DuckDB file (stop the server first)"
+	@echo "  make up                   start the decision store + embedding worker"
+	@echo "  make down                 stop and remove them"
+	@echo "  make logs                 follow their logs"
+	@echo "  make build                build the image"
 	@echo ""
-	@echo "  ingest/query/context are plain network clients (CONTEXT_STORE_URL=$(CONTEXT_STORE_URL))"
-	@echo "  and work the same way whether the server is this docker-compose stack or a remote host."
+	@echo "  make status               row counts on the store"
+	@echo "  make seed                 load demo decisions ($(SEED))"
+	@echo "  make find [TAGS=...]      find precedents by tag (limit $(LIMIT))"
+	@echo "  make detect               list LLM CLIs with sessions on this machine"
+	@echo "  make extract              scan those sessions and upsert decisions"
+	@echo ""
+	@echo "  make test                 offline checks, no server needed"
+	@echo "  make test-integration     checks that need a running store"
+	@echo "  make test-all             both of the above"
+	@echo ""
+	@echo "  make shell                shell inside the running store"
+	@echo "  make clean                delete the store's database file"
 
 build:
 	docker compose build
 
 up: build
-	docker compose up -d context-store
-	@echo "context-store running at $(CONTEXT_STORE_URL)"
+	docker compose up -d
+	@$(MAKE) --no-print-directory wait-store
+	@echo "decision store on quack://localhost:$${QUACK_PORT:-8888}"
 
 down:
 	docker compose down
 
-ingest:
-	python3 .claude/skills/tag-and-ingest/scripts/ingest.py $(FILE) --url $(CONTEXT_STORE_URL)
+logs:
+	docker compose logs -f
 
-query:
-	python3 .claude/skills/query-context/scripts/query.py "$(Q)" --top-k $(TOPK) --url $(CONTEXT_STORE_URL)
+# exec, not run: these talk to the *running* server. `compose run` would start a
+# second container where 127.0.0.1:8888 has nothing listening on it.
+EXEC := docker compose exec decision-store
 
-context:
-	python3 .claude/skills/project-context/scripts/project_context.py $(DOMAIN) \
-		$(if $(MODEL),--model $(MODEL)) $(if $(TAGS),--tags $(TAGS)) $(if $(CTXQ),--query "$(CTXQ)") \
-		--url $(CONTEXT_STORE_URL)
+# How long to wait for the store to report healthy, in seconds.
+WAIT ?= 60
 
-ui: build
-	docker compose up context-ui
+# `docker compose exec` fails against a container that is up but still starting,
+# which showed up once as a spurious exit 2 immediately after a --build. Every
+# exec target waits for the healthcheck first, so the command runs against a
+# store that is actually serving rather than one that merely exists.
+wait-store:
+	@id=$$(docker compose ps -q decision-store 2>/dev/null); \
+	if [ -z "$$id" ]; then \
+	  echo "decision-store nie dziala. Uruchom: make up"; exit 1; \
+	fi; \
+	for i in $$(seq 1 $(WAIT)); do \
+	  s=$$(docker inspect --format '{{.State.Health.Status}}' $$id 2>/dev/null); \
+	  if [ "$$s" = "healthy" ]; then exit 0; fi; \
+	  if [ "$$s" = "unhealthy" ]; then \
+	    echo "decision-store jest unhealthy. Zobacz: make logs"; exit 1; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "decision-store nie wstal w $(WAIT)s (status: $$s). Zobacz: make logs"; exit 1
+
+status: wait-store
+	$(EXEC) python db/cli.py status
+
+seed: wait-store
+	$(EXEC) python db/cli.py load $(SEED)
+
+find: wait-store
+	$(EXEC) python db/cli.py find --tags $(TAGS) --limit $(LIMIT)
+
+detect: wait-store
+	$(EXEC) python db/extract.py --detect
+
+extract: wait-store
+	$(EXEC) python db/extract.py --developer "$${USER}"
+
+test: wait-store
+	$(EXEC) python test_smoke.py
+
+# Runs inside the store's own container, so it reaches the server on localhost
+# and needs no ports or token from the host.
+test-integration: wait-store
+	$(EXEC) python test_integration.py --require
+
+test-all: test test-integration
+
+shell: wait-store
+	$(EXEC) bash
 
 clean:
-	rm -f data/db/context.duckdb data/db/context.duckdb.wal
+	rm -f data/db/decisions.duckdb data/db/decisions.duckdb.wal

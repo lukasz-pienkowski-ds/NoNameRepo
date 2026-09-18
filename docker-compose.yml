@@ -1,37 +1,46 @@
 services:
-  # Long-running context-store API: a small HTTP JSON service in front of
-  # DuckDB (db/server.py). Skills reach it as a plain network service at
-  # CONTEXT_STORE_URL — they don't run inside this container or touch the
-  # DuckDB file directly, so the same skill scripts work whether this is
-  # running via this compose stack or on a real remote server.
-  context-store:
+  # --- central decision store -------------------------------------------
+  # One process owns the decisions database and serves it to every machine over
+  # quack. This exists because a DuckDB file allows exactly one writing process,
+  # so pointing three laptops at a shared file deadlocks or corrupts it.
+  #
+  # Nothing else may open data/db/decisions.duckdb while this runs, not even a
+  # read-only script -- it will fail with "Could not set lock on file".
+  #
+  # quack_serve binds whatever address it is given, so a plain ports: mapping
+  # works and network_mode: host is not needed.
+  decision-store:
     build:
       context: .
       dockerfile: docker/Dockerfile
     volumes:
       - ./data:/app/data
-      - ./common:/app/common
-      - ./db:/app/db
+    environment:
+      QUACK_TOKEN: ${QUACK_TOKEN:-hackathon}
     ports:
-      - "8000:8000"
-    command: ["python", "-m", "db.server", "--host", "0.0.0.0", "--port", "8000"]
+      - "${QUACK_PORT:-8888}:8888"
+    command: ["python", "db/server.py", "--host", "0.0.0.0", "--port", "8888"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "db/cli.py", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # Serves DuckDB's built-in web UI/SQL console (db/serve_ui.py) at
-  # http://localhost:4213, for a human to browse the store — separate from
-  # the skills' API above, and read-only (context-store holds the one
-  # read-write connection while it's running). DuckDB's `ui` extension only
-  # binds to 127.0.0.1 inside its own process, so a normal `ports:` mapping
-  # wouldn't be reachable from the host — network_mode: host makes the
-  # container share the host's network namespace instead. (Linux only; on
-  # Docker Desktop for Mac/Windows run `uv run python db/serve_ui.py`
-  # directly on the host instead.)
-  context-ui:
+  # Fills in missing vectors. A separate service on purpose: it must not open
+  # the database file, so it connects over quack like any other client. It can
+  # be down for as long as you like -- rows queue up with embedding NULL and tag
+  # search keeps working.
+  embedding-worker:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    volumes:
-      - ./data:/app/data
-      - ./common:/app/common
-      - ./db:/app/db
-    network_mode: host
-    command: ["python", "db/serve_ui.py", "--port", "4213"]
+    environment:
+      QUACK_URI: quack://decision-store:8888
+      QUACK_TOKEN: ${QUACK_TOKEN:-hackathon}
+    command: ["python", "db/worker_embeddings.py"]
+    depends_on:
+      decision-store:
+        condition: service_healthy
+    restart: unless-stopped
